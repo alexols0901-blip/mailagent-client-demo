@@ -1,6 +1,7 @@
 import { page } from './ui.js';
 import networkCheck from './check.js';
-import {beginGmail,finishGmail,imapLogin,saveMailbox,syncMailbox} from './mail.js';
+import {beginGmail,finishGmail,imapLogin,saveMailbox,syncMailbox,smtpLogin} from './mail.js';
+import {automationTick,generateReply} from './automate.js';
 
 const enc=new TextEncoder();
 const random=()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),x=>x.toString(16).padStart(2,'0')).join('');
@@ -35,9 +36,10 @@ async function api(request,env,url){
  if(!env.DB)return json({error:'Database connection is not configured. No accounts or inboxes are available.'},503);
  if(method==='GET'&&p==='/api/status'){
   const existing=await env.DB.prepare("SELECT id FROM users WHERE role='owner' LIMIT 1").first();
-  return json({ownerExists:!!existing,setupAvailable:!existing&&!!env.SETUP_HASH,mailIntegrationReady:false,gmailConfigured:!!(env.GOOGLE_CLIENT_ID&&env.GOOGLE_CLIENT_SECRET),aiConfigured:!!env.AI});
+  return json({ownerExists:!!existing,setupAvailable:!existing&&!!env.SETUP_HASH,mailIntegrationReady:!!env.AI,gmailConfigured:!!(env.GOOGLE_CLIENT_ID&&env.GOOGLE_CLIENT_SECRET),aiConfigured:!!env.AI});
  }
  if(method==='GET'&&p==='/api/oauth/gmail/callback'){const path=await finishGmail(request,env,url);return new Response(null,{status:303,headers:{...headers,Location:path,'Set-Cookie':'__Host-mailagent-oauth=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0'}})}
+ if(method==='POST'&&p==='/api/owner/test-ai'){await owner(request,env,true);const reply=await generateReply(env,{name:'Test furniture store',instructions:'We sell tables and chairs. Website https://example.com. No prices or availability may be quoted.'},{subject:'What do you sell?',body:'Hello, do you sell furniture?'});return json({ok:true,result:reply})}
  if(method==='POST'&&p==='/api/setup'){
   const b=await body(request);await throttle(env,request,'setup');
   if(!env.SETUP_HASH||await digest(String(b.token||''))!==env.SETUP_HASH)throw bad('Owner setup has not been authorized.',403);
@@ -90,32 +92,34 @@ async function api(request,env,url){
  if(match){
   const u=await requireUser(request,env,method!=='GET'),id=match[1];access(u,id);
   const c=await env.DB.prepare('SELECT * FROM companies WHERE id=?').bind(id).first();if(!c)throw bad('Company not found.',404);
-  if(method==='GET'&&!match[2])return json({company:c});
+  if(method==='GET'&&!match[2]){const health=await env.DB.prepare('SELECT last_tick,last_error FROM worker_health WHERE id=1').first();return json({company:c,worker:health})}
   if(method==='PUT'&&!match[2]){
    const b=await body(request),instructions=String(b.instructions||''),human=normalize(b.humanEmail);
    if(instructions.length>5000||human&&!validEmail(human))throw bad('Check the instructions and human email.');
-   if(b.autoReply)throw bad('Automatic sending is unavailable until the mailbox and AI integrations pass their checks.',409);
-   await env.DB.prepare('UPDATE companies SET instructions=?,human_email=?,auto_reply=0 WHERE id=?').bind(instructions,human,id).run();await audit(env,u,'settings_updated',id);return json({ok:true});
+   const enabled=b.autoReply===true;
+   if(enabled){if(!env.AI)throw bad('The AI service is not connected.',409);if(instructions.trim().length<40||!validEmail(human))throw bad('Add company facts and a human email before enabling automation.',409);const boxes=(await env.DB.prepare('SELECT address,send_allowed FROM mailbox_accounts WHERE company_id=? AND enabled=1').bind(id).all()).results;if(!boxes.length||boxes.some(x=>!x.send_allowed))throw bad('Connect a mailbox and grant sending permission for every active mailbox first.',409);if(boxes.some(x=>normalize(x.address)===human))throw bad('Use a different human mailbox to prevent forwarding loops.',409);if(!c.auto_reply&&b.confirmAutomation!==true)throw bad('Confirm automatic sending and AI email processing before enabling it.',409)}
+   await env.DB.prepare('UPDATE companies SET instructions=?,human_email=?,auto_reply=?,automation_started_at=? WHERE id=?').bind(instructions,human,enabled?1:0,enabled?(c.auto_reply?c.automation_started_at:now()):c.automation_started_at,id).run();
+   if(enabled&&!c.auto_reply)await env.DB.prepare('UPDATE mailbox_accounts SET cursor=NULL WHERE company_id=?').bind(id).run();await audit(env,u,'settings_updated',id);return json({ok:true});
   }
   if(match[2]==='rules'&&method==='GET'){const r=await env.DB.prepare('SELECT id,sender,human_email,enabled FROM forwarding_rules WHERE company_id=? ORDER BY sender').bind(id).all();return json({rules:r.results})}
   if(match[2]==='rules'&&method==='POST'){
    const b=await body(request),sender=normalize(b.sender),to=normalize(b.humanEmail);if(!validEmail(sender)||!validEmail(to)||sender===to)throw bad('Enter two different valid email addresses.');
    try{await env.DB.prepare('INSERT INTO forwarding_rules(id,company_id,sender,human_email) VALUES(?,?,?,?)').bind(crypto.randomUUID(),id,sender,to).run()}catch{throw bad('A rule for this sender already exists.',409)}await audit(env,u,'forwarding_rule_created',id);return json({ok:true},201);
   }
-  if(match[2]==='messages'&&method==='GET'){const r=await env.DB.prepare('SELECT id,sender,subject,body,received_at,status,reply_text,forwarded_to FROM messages WHERE company_id=? ORDER BY received_at DESC LIMIT 100').bind(id).all();return json({messages:r.results})}
+  if(match[2]==='messages'&&method==='GET'){const r=await env.DB.prepare('SELECT id,sender,subject,body,received_at,status,reply_text,forwarded_to,last_error FROM messages WHERE company_id=? ORDER BY received_at DESC LIMIT 100').bind(id).all();return json({messages:r.results})}
   if(match[2]==='mailboxes'&&method==='POST'){
    const b=await body(request);await throttle(env,request,'mailbox:'+u.id);
    if(b.provider==='gmail'){const flow=await beginGmail(request,env,u,id,url.origin);return json({url:flow.url},200,{'Set-Cookie':flow.cookie})}
    if(b.provider!=='infomaniak'||!validEmail(normalize(b.address))||typeof b.password!=='string'||!b.password||b.password.length>512)throw bad('Enter your Infomaniak mailbox address and its mail password.');
    if(!env.MAILBOX_KEY)throw bad('Secure mailbox storage is not configured.',503);
-   const address=normalize(b.address),check=await imapLogin(address,b.password);await check.close();
-   const mailboxId=await saveMailbox(env,id,'infomaniak',address,{password:b.password});await audit(env,u,'infomaniak_connected',id);return json({ok:true,mailboxId},201);
+   const address=normalize(b.address),check=await imapLogin(address,b.password);await check.close();const smtp=await smtpLogin(address,b.password);await smtp.close();
+   const mailboxId=await saveMailbox(env,id,'infomaniak',address,{password:b.password});await env.DB.prepare('UPDATE mailbox_accounts SET send_allowed=1 WHERE id=?').bind(mailboxId).run();await audit(env,u,'infomaniak_connected',id);return json({ok:true,mailboxId},201);
   }
-  if(match[2]==='mailboxes'&&method==='GET'){const r=await env.DB.prepare('SELECT id,provider,address,enabled,last_error,last_sync_at FROM mailbox_accounts WHERE company_id=?').bind(id).all();return json({mailboxes:r.results})}
+  if(match[2]==='mailboxes'&&method==='GET'){const r=await env.DB.prepare('SELECT id,provider,address,enabled,send_allowed,last_error,last_sync_at FROM mailbox_accounts WHERE company_id=?').bind(id).all();return json({mailboxes:r.results})}
  }
  const mailbox=p.match(/^\/api\/mailboxes\/([a-f0-9-]+)(?:\/(sync))?$/);
  if(mailbox){const u=await requireUser(request,env,true);const m=await env.DB.prepare('SELECT * FROM mailbox_accounts WHERE id=?').bind(mailbox[1]).first();if(!m)throw bad('Mailbox not found.',404);access(u,m.company_id);
-  if(method==='DELETE'&&!mailbox[2]){await env.DB.prepare("UPDATE mailbox_accounts SET enabled=0,credentials_ciphertext='',last_error=NULL WHERE id=?").bind(m.id).run();await audit(env,u,'mailbox_disconnected',m.company_id);return json({ok:true})}
+  if(method==='DELETE'&&!mailbox[2]){await env.DB.prepare("UPDATE mailbox_accounts SET enabled=0,credentials_ciphertext='',send_allowed=0,last_error=NULL WHERE id=?").bind(m.id).run();await audit(env,u,'mailbox_disconnected',m.company_id);return json({ok:true})}
   if(method==='POST'&&mailbox[2]==='sync'){const lock=await env.DB.prepare('INSERT INTO mailbox_sync_locks(mailbox_id,expires_at) VALUES(?,?) ON CONFLICT(mailbox_id) DO UPDATE SET expires_at=excluded.expires_at WHERE expires_at<?').bind(m.id,now()+45,now()).run();if(!lock.meta.changes)throw bad('This inbox was just refreshed. Try again shortly.',429);const count=await syncMailbox(env,m);return json({ok:true,imported:count})}
  }
  const rule=p.match(/^\/api\/rules\/([a-f0-9-]+)$/);
@@ -123,6 +127,7 @@ async function api(request,env,url){
  throw bad('Not found.',404);
 }
 export default {
+ async scheduled(event,env,ctx){ctx.waitUntil(automationTick(env));},
  async fetch(request,env,ctx){
   const url=new URL(request.url);if(url.pathname==='/check')return networkCheck.fetch(request,env,ctx);
   if(url.pathname==='/favicon.ico')return new Response(null,{status:204});
