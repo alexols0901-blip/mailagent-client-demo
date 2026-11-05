@@ -1,5 +1,16 @@
 {
   "name": "mailagent-network-check",
-  "main": "check.js",
-  "compatibility_date": "2026-11-05"
+  "main": "app.js",
+  "compatibility_date": "2026-11-05",
+  "preview_urls": false,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mailagent-ai",
+      "database_id": "d655dbc7-bdc8-4229-a41b-ab8522a08152"
+    }
+  ],
+  "vars": {
+    "OWNER_EMAIL": "alex@olsenholdings.ch"
+  }
 }
