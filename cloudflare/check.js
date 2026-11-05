@@ -24,6 +24,11 @@ export default {
     const results = [];
     // Sequential to stay below Workers simultaneous connection limits.
     for (const [port, transport] of [[993, 'on'], [465, 'on'], [587, 'off']]) results.push(await probe(port, transport));
-    return Response.json({ purpose: 'Network connectivity only. No email account was accessed and no message was sent.', results }, { headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+    let gmail;
+    try {
+      const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', { signal: AbortSignal.timeout(8000) });
+      gmail = { reachable: response.status === 401, status: response.status, note: '401 is expected because this test sends no credentials.' };
+    } catch (error) { gmail = { reachable: false, error: String(error.message).slice(0, 180) }; }
+    return Response.json({ purpose: 'Network connectivity only. No email account was accessed and no message was sent.', results, gmail }, { headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
   }
 };
