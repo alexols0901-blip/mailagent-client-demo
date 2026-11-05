@@ -1,5 +1,6 @@
 import { connect } from 'cloudflare:sockets';
 import PostalMime from 'postal-mime';
+import {renderBrandedReply,brandingFor} from './email-template.js';
 const encoder=new TextEncoder(),decoder=new TextDecoder();
 const bytesTo64=b=>btoa(Array.from(b,x=>String.fromCharCode(x)).join(''));
 const from64=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));
@@ -35,7 +36,19 @@ export async function finishGmail(request,env,url){const state=url.searchParams.
 
 const emailOk=s=>typeof s==='string'&&/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(s)&&s.length<255;
 const encoded=s=>'=?UTF-8?B?'+bytesTo64(encoder.encode(String(s).replace(/[\r\n]/g,' ')))+'?=';
-export function composeMail(from,m){if(!emailOk(from)||!emailOk(m.to))throw fail('Invalid delivery address.');const id=String(m.messageId||'');if(!/^<[A-Za-z0-9@.\-]+>$/.test(id))throw fail('Invalid message identifier.');const parent=/^<[^<>\s]+@[^<>\s]+>$/.test(m.inReplyTo||'')?m.inReplyTo:null;return ['From: '+from,'To: '+m.to,'Subject: '+encoded(m.subject),'Date: '+new Date().toUTCString(),'Message-ID: '+id,...(parent?['In-Reply-To: '+parent,'References: '+parent]:[]),'Auto-Submitted: auto-replied','X-Auto-Response-Suppress: All','MIME-Version: 1.0','Content-Type: text/plain; charset=UTF-8','Content-Transfer-Encoding: base64','',''+bytesTo64(encoder.encode(m.body)).match(/.{1,76}/g).join('\r\n'),''].join('\r\n')}
+export function composeMail(from,m){
+ if(!emailOk(from)||!emailOk(m.to))throw fail('Invalid delivery address.');const id=String(m.messageId||'');if(!/^<[A-Za-z0-9@.\-]+>$/.test(id))throw fail('Invalid message identifier.');const parent=/^<[^<>\s]+@[^<>\s]+>$/.test(m.inReplyTo||'')?m.inReplyTo:null;
+ const branded=m.company?renderBrandedReply(m.company,m.body):null,fold=s=>(bytesTo64(encoder.encode(s)).match(/.{1,76}/g)||[]).join('\r\n');
+ const fromHeader=m.company?encoded(brandingFor(m.company).team)+' <'+from+'>':from;
+ const headers=['From: '+fromHeader,'To: '+m.to,'Subject: '+encoded(m.subject),'Date: '+new Date().toUTCString(),'Message-ID: '+id,...(parent?['In-Reply-To: '+parent,'References: '+parent]:[]),'Auto-Submitted: auto-replied','X-Auto-Response-Suppress: All','MIME-Version: 1.0'];
+ if(!branded)return [...headers,'Content-Type: text/plain; charset=UTF-8','Content-Transfer-Encoding: base64','',fold(m.body),''].join('\r\n');
+ const alt='alt_'+crypto.randomUUID(),related='related_'+crypto.randomUUID();
+ const content=['--'+alt,'Content-Type: text/plain; charset=UTF-8','Content-Transfer-Encoding: base64','',fold(branded.text),'--'+alt,'Content-Type: text/html; charset=UTF-8','Content-Transfer-Encoding: base64','',fold(branded.html),'--'+alt+'--',''];
+ if(!branded.inline.length)return [...headers,'Content-Type: multipart/alternative; boundary="'+alt+'"','',...content].join('\r\n');
+ const parts=[...headers,'Content-Type: multipart/related; boundary="'+related+'"','', '--'+related,'Content-Type: multipart/alternative; boundary="'+alt+'"','',...content];
+ for(const img of branded.inline)parts.push('--'+related,'Content-Type: '+img.type+'; name="'+img.filename+'"','Content-Transfer-Encoding: base64','Content-ID: <'+img.cid+'>','Content-Disposition: inline; filename="'+img.filename+'"','',(img.base64.match(/.{1,76}/g)||[]).join('\r\n'));
+ parts.push('--'+related+'--','');return parts.join('\r\n');
+}
 export class Smtp extends Imap{
  async response(code){let line;for(let i=0;i<100;i++){line=await this.line();if(!/^\d{3}[- ]/.test(line))throw fail('Invalid SMTP response.',502);if(line[3]===' '){if(Number(line.slice(0,3))!==code)throw fail('Infomaniak did not accept this SMTP step.',502);return line}}throw fail('SMTP response too long.',502)}
  async step(command,code){if(/[\r\n]/.test(command))throw fail('Invalid SMTP command.');await this.writer.write(encoder.encode(command+'\r\n'));return this.response(code)}
