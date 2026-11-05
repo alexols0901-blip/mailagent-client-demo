@@ -75,12 +75,14 @@ async function api(request,env,url){
   const u=await owner(request,env,true),b=await body(request),slug=normalize(b.slug),name=String(b.name||'').trim(),email=normalize(b.email),accent=String(b.accent||'#6c56da');
   if(!/^[a-z][a-z0-9-]{1,49}$/.test(slug)||['api','login','setup','owner','invite','logout','check','favicon'].includes(slug))throw bad('Use a unique page ID of 2–50 lowercase letters, numbers or hyphens, starting with a letter.');
   if(!name||name.length>80||!validEmail(email)||!/^#[a-fA-F0-9]{6}$/.test(accent))throw bad('Enter a company name, valid client email and color.');
+  const ownerManaged=email===u.email;
+  if(!ownerManaged&&await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first())throw bad('This email already has an account. Use a different company login email.',409);
   const id=crypto.randomUUID(),token=random();
   try{await env.DB.batch([
    env.DB.prepare('INSERT INTO companies(id,slug,name,accent,created_at) VALUES(?,?,?,?,?)').bind(id,slug,name,accent,now()),
-   env.DB.prepare('INSERT INTO invitations(token_hash,company_id,email,expires_at) VALUES(?,?,?,?)').bind(await digest(token),id,email,now()+172800)
+   ...(!ownerManaged?[env.DB.prepare('INSERT INTO invitations(token_hash,company_id,email,expires_at) VALUES(?,?,?,?)').bind(await digest(token),id,email,now()+172800)]:[])
   ])}catch{throw bad('That company page ID is already in use.',409)}
-  await audit(env,u,'company_created',id);return json({id,slug,inviteUrl:url.origin+'/invite#'+token,expiresInHours:48},201);
+  await audit(env,u,'company_created',id);return json({id,slug,inviteUrl:ownerManaged?null:url.origin+'/invite#'+token,ownerManaged,workspaceUrl:url.origin+'/'+slug,expiresInHours:ownerManaged?null:48},201);
  }
  const match=p.match(/^\/api\/companies\/([a-f0-9-]+)(?:\/(rules|messages|mailboxes))?$/);
  if(match){
