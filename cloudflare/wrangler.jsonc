@@ -12,5 +12,13 @@
   ],
   "vars": {
     "OWNER_EMAIL": "alex@olsenholdings.ch"
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
   }
 }
