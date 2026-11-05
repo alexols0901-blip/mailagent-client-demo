@@ -40,7 +40,7 @@ export function composeMail(from,m){
  if(!emailOk(from)||!emailOk(m.to))throw fail('Invalid delivery address.');const id=String(m.messageId||'');if(!/^<[A-Za-z0-9@.\-]+>$/.test(id))throw fail('Invalid message identifier.');const parent=/^<[^<>\s]+@[^<>\s]+>$/.test(m.inReplyTo||'')?m.inReplyTo:null;
  const branded=m.company?renderBrandedReply(m.company,m.body):null,fold=s=>(bytesTo64(encoder.encode(s)).match(/.{1,76}/g)||[]).join('\r\n');
  const fromHeader=m.company?encoded(brandingFor(m.company).team)+' <'+from+'>':from;
- const headers=['From: '+fromHeader,'To: '+m.to,'Subject: '+encoded(m.subject),'Date: '+new Date().toUTCString(),'Message-ID: '+id,...(parent?['In-Reply-To: '+parent,'References: '+parent]:[]),'Auto-Submitted: auto-replied','X-Auto-Response-Suppress: All','MIME-Version: 1.0'];
+ const headers=['From: '+fromHeader,'To: '+m.to,...(m.replyTo&&emailOk(m.replyTo)?['Reply-To: '+m.replyTo]:[]),'Subject: '+encoded(m.subject),'Date: '+new Date().toUTCString(),'Message-ID: '+id,...(parent?['In-Reply-To: '+parent,'References: '+parent]:[]),'Auto-Submitted: auto-replied','X-Auto-Response-Suppress: All','MIME-Version: 1.0'];
  if(!branded)return [...headers,'Content-Type: text/plain; charset=UTF-8','Content-Transfer-Encoding: base64','',fold(m.body),''].join('\r\n');
  const alt='alt_'+crypto.randomUUID(),related='related_'+crypto.randomUUID();
  const content=['--'+alt,'Content-Type: text/plain; charset=UTF-8','Content-Transfer-Encoding: base64','',fold(branded.text),'--'+alt,'Content-Type: text/html; charset=UTF-8','Content-Transfer-Encoding: base64','',fold(branded.html),'--'+alt+'--',''];
