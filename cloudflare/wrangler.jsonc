@@ -1,0 +1,5 @@
+{
+  "name": "mailagent-network-check",
+  "main": "check.js",
+  "compatibility_date": "2026-11-05"
+}
