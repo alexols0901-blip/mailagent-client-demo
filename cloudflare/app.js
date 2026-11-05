@@ -1,5 +1,6 @@
 import { page } from './ui.js';
 import networkCheck from './check.js';
+import {beginGmail,finishGmail,imapLogin,saveMailbox,syncMailbox} from './mail.js';
 
 const enc=new TextEncoder();
 const random=()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),x=>x.toString(16).padStart(2,'0')).join('');
@@ -36,6 +37,7 @@ async function api(request,env,url){
   const existing=await env.DB.prepare("SELECT id FROM users WHERE role='owner' LIMIT 1").first();
   return json({ownerExists:!!existing,setupAvailable:!existing&&!!env.SETUP_HASH,mailIntegrationReady:false,gmailConfigured:!!(env.GOOGLE_CLIENT_ID&&env.GOOGLE_CLIENT_SECRET),aiConfigured:!!env.AI});
  }
+ if(method==='GET'&&p==='/api/oauth/gmail/callback'){const path=await finishGmail(request,env,url);return new Response(null,{status:303,headers:{...headers,Location:path,'Set-Cookie':'__Host-mailagent-oauth=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0'}})}
  if(method==='POST'&&p==='/api/setup'){
   const b=await body(request);await throttle(env,request,'setup');
   if(!env.SETUP_HASH||await digest(String(b.token||''))!==env.SETUP_HASH)throw bad('Owner setup has not been authorized.',403);
@@ -101,7 +103,20 @@ async function api(request,env,url){
    try{await env.DB.prepare('INSERT INTO forwarding_rules(id,company_id,sender,human_email) VALUES(?,?,?,?)').bind(crypto.randomUUID(),id,sender,to).run()}catch{throw bad('A rule for this sender already exists.',409)}await audit(env,u,'forwarding_rule_created',id);return json({ok:true},201);
   }
   if(match[2]==='messages'&&method==='GET'){const r=await env.DB.prepare('SELECT id,sender,subject,body,received_at,status,reply_text,forwarded_to FROM messages WHERE company_id=? ORDER BY received_at DESC LIMIT 100').bind(id).all();return json({messages:r.results})}
+  if(match[2]==='mailboxes'&&method==='POST'){
+   const b=await body(request);await throttle(env,request,'mailbox:'+u.id);
+   if(b.provider==='gmail'){const flow=await beginGmail(request,env,u,id,url.origin);return json({url:flow.url},200,{'Set-Cookie':flow.cookie})}
+   if(b.provider!=='infomaniak'||!validEmail(normalize(b.address))||typeof b.password!=='string'||!b.password||b.password.length>512)throw bad('Enter your Infomaniak mailbox address and its mail password.');
+   if(!env.MAILBOX_KEY)throw bad('Secure mailbox storage is not configured.',503);
+   const address=normalize(b.address),check=await imapLogin(address,b.password);await check.close();
+   const mailboxId=await saveMailbox(env,id,'infomaniak',address,{password:b.password});await audit(env,u,'infomaniak_connected',id);return json({ok:true,mailboxId},201);
+  }
   if(match[2]==='mailboxes'&&method==='GET'){const r=await env.DB.prepare('SELECT id,provider,address,enabled,last_error,last_sync_at FROM mailbox_accounts WHERE company_id=?').bind(id).all();return json({mailboxes:r.results})}
+ }
+ const mailbox=p.match(/^\/api\/mailboxes\/([a-f0-9-]+)(?:\/(sync))?$/);
+ if(mailbox){const u=await requireUser(request,env,true);const m=await env.DB.prepare('SELECT * FROM mailbox_accounts WHERE id=?').bind(mailbox[1]).first();if(!m)throw bad('Mailbox not found.',404);access(u,m.company_id);
+  if(method==='DELETE'&&!mailbox[2]){await env.DB.prepare("UPDATE mailbox_accounts SET enabled=0,credentials_ciphertext='',last_error=NULL WHERE id=?").bind(m.id).run();await audit(env,u,'mailbox_disconnected',m.company_id);return json({ok:true})}
+  if(method==='POST'&&mailbox[2]==='sync'){const lock=await env.DB.prepare('INSERT INTO mailbox_sync_locks(mailbox_id,expires_at) VALUES(?,?) ON CONFLICT(mailbox_id) DO UPDATE SET expires_at=excluded.expires_at WHERE expires_at<?').bind(m.id,now()+45,now()).run();if(!lock.meta.changes)throw bad('This inbox was just refreshed. Try again shortly.',429);const count=await syncMailbox(env,m);return json({ok:true,imported:count})}
  }
  const rule=p.match(/^\/api\/rules\/([a-f0-9-]+)$/);
  if(rule&&method==='DELETE'){const u=await requireUser(request,env,true),r=await env.DB.prepare('SELECT company_id FROM forwarding_rules WHERE id=?').bind(rule[1]).first();if(!r)throw bad('Rule not found.',404);access(u,r.company_id);await env.DB.prepare('DELETE FROM forwarding_rules WHERE id=? AND company_id=?').bind(rule[1],r.company_id).run();await audit(env,u,'forwarding_rule_removed',r.company_id);return json({ok:true})}
