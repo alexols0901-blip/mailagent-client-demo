@@ -2,6 +2,7 @@ import { page } from './ui.js';
 import networkCheck from './check.js';
 import {beginGmail,finishGmail,imapLogin,saveMailbox,syncMailbox,smtpLogin} from './mail.js';
 import {automationTick,generateReply} from './automate.js';
+import {cleanBranding,renderBrandedReply,logoResponse} from './email-template.js';
 
 const enc=new TextEncoder();
 const random=()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),x=>x.toString(16).padStart(2,'0')).join('');
@@ -88,11 +89,13 @@ async function api(request,env,url){
   ])}catch{throw bad('That company page ID is already in use.',409)}
   await audit(env,u,'company_created',id);return json({id,slug,inviteUrl:ownerManaged?null:url.origin+'/invite#'+token,ownerManaged,workspaceUrl:url.origin+'/'+slug,expiresInHours:ownerManaged?null:48},201);
  }
- const match=p.match(/^\/api\/companies\/([a-f0-9-]+)(?:\/(rules|messages|mailboxes))?$/);
+ const match=p.match(/^\/api\/companies\/([a-f0-9-]+)(?:\/(rules|messages|mailboxes|branding|email-preview))?$/);
  if(match){
   const u=await requireUser(request,env,method!=='GET'),id=match[1];access(u,id);
   const c=await env.DB.prepare('SELECT * FROM companies WHERE id=?').bind(id).first();if(!c)throw bad('Company not found.',404);
   if(method==='GET'&&!match[2]){const health=await env.DB.prepare('SELECT last_tick,last_error FROM worker_health WHERE id=1').first();return json({company:c,worker:health})}
+  if(method==='PUT'&&match[2]==='branding'){const b=await body(request);let brand;try{brand=cleanBranding(b)}catch(e){throw bad(e.message)}await env.DB.prepare('UPDATE companies SET email_branding=? WHERE id=?').bind(JSON.stringify(brand),id).run();await audit(env,u,'email_branding_updated',id);return json({ok:true})}
+  if(method==='GET'&&match[2]==='email-preview'){const preview=renderBrandedReply(c,'Hello,\n\nThank you for contacting '+c.name+'. You can explore our furniture collection and catalogue using the links below.\n\nIf you have a question about a specific piece, please reply with its name.',{preview:true});return new Response(preview.html,{headers:{...headers,'Content-Type':'text/html; charset=UTF-8','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; img-src 'self' https:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"}})}
   if(method==='PUT'&&!match[2]){
    const b=await body(request),instructions=String(b.instructions||''),human=normalize(b.humanEmail);
    if(instructions.length>5000||human&&!validEmail(human))throw bad('Check the instructions and human email.');
@@ -129,7 +132,7 @@ async function api(request,env,url){
 export default {
  async scheduled(event,env,ctx){ctx.waitUntil(automationTick(env));},
  async fetch(request,env,ctx){
-  const url=new URL(request.url);if(url.pathname==='/check')return networkCheck.fetch(request,env,ctx);
+  const url=new URL(request.url);if(url.pathname==='/email-assets/dk3-logo.png'&&request.method==='GET')return logoResponse();if(url.pathname==='/check')return networkCheck.fetch(request,env,ctx);
   if(url.pathname==='/favicon.ico')return new Response(null,{status:204});
   try{
    if(request.method!=='GET'&&request.headers.get('Origin')!==url.origin)throw bad('Request origin is not allowed.',403);
